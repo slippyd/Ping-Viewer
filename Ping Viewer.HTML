@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Ping Viewer</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+
+<style>
+html, body {
+    height: 100%;
+    margin: 0;
+    font-family: Arial, sans-serif;
+}
+
+#controls {
+    padding: 10px;
+    background: #f4f4f4;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+#map {
+    height: 50vh;
+    min-height: 350px;
+    width: 100%;
+    background: #ddd;
+    margin-bottom: 10px;
+}
+
+textarea {
+    width: 100%;
+    height: 120px;
+    font-family: monospace;
+}
+
+button, select {
+    padding: 5px 8px;
+    font-size: 0.9em;
+    cursor: pointer;
+}
+
+.table-container {
+    max-height: 450px;  /* You can adjust the height here */
+    overflow-y: auto;
+    margin-bottom: 20px;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+th, td {
+    border: 1px solid #ccc;
+    padding: 5px;
+    text-align: center;
+}
+
+th {
+    background: #eee;
+    cursor: pointer;
+}
+</style>
+</head>
+
+<body>
+
+<div id="controls">
+    <textarea id="pasteInput" placeholder="Paste alert data here..."></textarea>
+    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button onclick="parseAndAdd()">Add Alert</button>
+        <button onclick="centerAll()">Center All Circles</button>
+        <label>Filter by Category:
+            <select id="categoryFilter" onchange="applyFilter()">
+                <option value="All">All</option>
+            </select>
+        </label>
+        <button onclick="exportKML()">Export KML</button>
+        <button onclick="exportJSON()">Export Table Data as JSON</button>
+        <input type="file" id="importJSONFile" onchange="importJSON(event)" />
+    </div>
+</div>
+
+<div id="map"></div>
+
+<div class="table-container">
+    <table>
+    <thead>
+    <tr>
+        <th>#</th>
+        <th onclick="sortByTime()">Ping Time &#x21C5;</th>
+        <th>Category</th>
+        <th>Latitude</th>
+        <th>Longitude</th>
+        <th>Radius (m)</th>
+        <th>Action</th>
+    </tr>
+    </thead>
+    <tbody id="alertTable"></tbody>
+    </table>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+let map;
+let count = 0;
+let circles = [];
+let markers = [];
+let alerts = []; // store alert data
+let categoryColors = {};
+let defaultColors = [
+    "#e6194B", "#3cb44b", "#ffe119", "#4363d8",
+    "#f58231", "#911eb4", "#46f0f0", "#f032e6",
+    "#bcf60c", "#fabebe", "#008080", "#e6beff"
+];
+let nextColorIndex = 0;
+let sortAsc = true; // for sorting toggle
+let filteredCategory = "All";
+
+document.addEventListener("DOMContentLoaded", () => {
+    map = L.map("map").setView([44.3148, -85.6024], 6);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: "© OpenStreetMap contributors"
+    }).addTo(map);
+});
+
+// Parse pasted input and add alert
+function parseAndAdd() {
+    const input = document.getElementById("pasteInput").value;
+
+    const timeMatch = input.match(/Ping Time:\s*([\s\S]+?)\n\n/);
+    const locationMatch = input.match(/Ping Location:\s*([\d\.\-]+),\s*([\d\.\-]+)/);
+    const radiusMatch = input.match(/Ping Accuracy:\s*([\d\.]+)\s*Meters/i);
+    const categoryMatch = input.match(/Alert Description:\s*([\s\S]+)/);
+
+    if (!timeMatch || !locationMatch || !radiusMatch || !categoryMatch) {
+        alert("Invalid format. Include Ping Time, Ping Location, Ping Accuracy, and Alert Description.");
+        return;
+    }
+
+    const pingTime = timeMatch[1].trim();
+    const lat = parseFloat(locationMatch[1]);
+    const lng = parseFloat(locationMatch[2]);
+    const radius = parseFloat(radiusMatch[1]);
+    const category = categoryMatch[1].trim();
+
+    if (!categoryColors[category]) {
+        categoryColors[category] = defaultColors[nextColorIndex % defaultColors.length];
+        nextColorIndex++;
+    }
+    const color = categoryColors[category];
+
+    count++;
+
+    // Add circle
+    const circle = L.circle([lat, lng], {
+        radius,
+        color,
+        fillColor: color,
+        fillOpacity: 0.25
+    }).addTo(map);
+
+    // Add marker with number
+    const marker = L.marker([lat, lng], {
+        icon: L.divIcon({
+            html: `<div style="
+                background:${color};
+                color:white;
+                width:26px;
+                height:26px;
+                border-radius:50%;
+                text-align:center;
+                line-height:26px;
+                font-weight:bold;">
+                ${count}
+            </div>`
+        })
+    }).addTo(map);
+
+    circles.push(circle);
+    markers.push(marker);
+
+    // Store alert info
+    alerts.push({
+        number: count,
+        pingTime,
+        category,
+        lat,
+        lng,
+        radius,
+        circle,
+        marker
+    });
+
+    // Update category filter options
+    updateCategoryFilter();
+
+    renderTable();
+    applyFilter(); // ensure filtered view updates
+
+    map.setView([lat, lng], 13);
+    document.getElementById("pasteInput").value = "";
+}
+
+// Render table based on filteredCategory
+function renderTable() {
+    const tbody = document.getElementById("alertTable");
+    tbody.innerHTML = "";
+
+    alerts.forEach((alert, index) => {
+        if (filteredCategory !== "All" && alert.category !== filteredCategory) return;
+
+        const row = document.createElement("tr");
+        row.innerHTML = `
+            <td>${alert.number}</td>
+            <td>${alert.pingTime}</td>
+            <td>${alert.category}</td>
+            <td>${alert.lat.toFixed(6)}</td>
+            <td>${alert.lng.toFixed(6)}</td>
+            <td>${alert.radius}</td>
+            <td>
+                <button onclick="goThere(${index})">GO THERE</button>
+                <button onclick="deleteAlert(${index})">Delete</button>
+            </td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+// Delete an alert (remove from map and alerts list)
+function deleteAlert(index) {
+    const alert = alerts[index];
+    
+    // Remove circle and marker from the map
+    if (map.hasLayer(alert.circle)) map.removeLayer(alert.circle);
+    if (map.hasLayer(alert.marker)) map.removeLayer(alert.marker);
+
+    // Remove from alerts array
+    alerts.splice(index, 1);
+
+    // Remove the circle and marker from the circles and markers arrays
+    circles.splice(index, 1);
+    markers.splice(index, 1);
+
+    // Re-render the table and update the filter
+    renderTable();
+    applyFilter();
+}
+
+// Update category dropdown
+function updateCategoryFilter() {
+    const select = document.getElementById("categoryFilter");
+    const existingCategories = Array.from(select.options).map(o => o.value);
+
+    Object.keys(categoryColors).forEach(cat => {
+        if (!existingCategories.includes(cat)) {
+            const option = document.createElement("option");
+            option.value = cat;
+            option.textContent = cat;
+            select.appendChild(option);
+        }
+    });
+}
+
+// Apply category filter
+function applyFilter() {
+    const select = document.getElementById("categoryFilter");
+    filteredCategory = select.value;
+
+    // Show/hide circles & markers
+    alerts.forEach(alert => {
+        if (filteredCategory === "All" || alert.category === filteredCategory) {
+            if (!map.hasLayer(alert.circle)) alert.circle.addTo(map);
+            if (!map.hasLayer(alert.marker)) alert.marker.addTo(map);
+        } else {
+            if (map.hasLayer(alert.circle)) map.removeLayer(alert.circle);
+            if (map.hasLayer(alert.marker)) map.removeLayer(alert.marker);
+        }
+    });
+
+    renderTable();
+}
+
+// Centers map to show all visible circles
+function centerAll() {
+    const visibleCircles = alerts.filter(a => filteredCategory === "All" || a.category === filteredCategory).map(a => a.circle);
+    if (visibleCircles.length === 0) return;
+
+    const group = L.featureGroup(visibleCircles);
+    map.fitBounds(group.getBounds().pad(0.2));
+}
+
+// Center on one circle
+function goThere(index) {
+    if (index < 0 || index >= markers.length) return;
+    const alert = alerts[index];
+    if (filteredCategory !== "All" && alert.category !== filteredCategory) return;
+    map.setView(alert.marker.getLatLng(), 13);
+}
+
+// Sort table by Ping Time
+function sortByTime() {
+    alerts.sort((a, b) => {
+        const t1 = new Date(a.pingTime);
+        const t2 = new Date(b.pingTime);
+        return sortAsc ? t1 - t2 : t2 - t1;
+    });
+    sortAsc = !sortAsc;
+    renderTable();
+}
+
+// Export table data as JSON
+function exportJSON() {
+    if (alerts.length === 0) {
+        alert("No alerts to export.");
+        return;
+    }
+
+    try {
+        // Create a new array with only the necessary properties
+        const exportData = alerts.map(alert => ({
+            number: alert.number,
+            pingTime: alert.pingTime,
+            category: alert.category,
+            lat: alert.lat,
+            lng: alert.lng,
+            radius: alert.radius
+        }));
+
+        // Convert the filtered data into a JSON string
+        const jsonData = JSON.stringify(exportData, null, 2);
+
+        // Create a Blob from the JSON data
+        const blob = new Blob([jsonData], { type: 'application/json' });
+
+        // Create a temporary URL for the Blob
+        const url = URL.createObjectURL(blob);
+
+        // Create a temporary link element to trigger the download
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "alerts.json"; // Set the default filename
+        document.body.appendChild(a); // Append the link to the body (required for older browsers)
+        a.click();  // Trigger the download
+
+        // Clean up by removing the link
+        document.body.removeChild(a);
+        // Revoke the object URL to release memory
+        URL.revokeObjectURL(url);
+    } catch (e) {
+        console.error("Error exporting JSON:", e);
+        alert("An error occurred while exporting data.");
+    }
+}
+
+// Import JSON data
+function importJSON(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const data = JSON.parse(e.target.result);
+        
+        // Clear current alerts, circles, and markers
+        alerts.forEach(alert => {
+            if (map.hasLayer(alert.circle)) map.removeLayer(alert.circle);
+            if (map.hasLayer(alert.marker)) map.removeLayer(alert.marker);
+        });
+
+        alerts = [];
+        circles = [];
+        markers = [];
+
+        // Add alerts from the imported JSON
+        data.forEach((alertData, index) => {
+            const { number, pingTime, category, lat, lng, radius } = alertData;
+
+            const color = categoryColors[category] || defaultColors[nextColorIndex % defaultColors.length];
+            if (!categoryColors[category]) {
+                categoryColors[category] = color;
+                nextColorIndex++;
+            }
+
+            count = number;
+
+            const circle = L.circle([lat, lng], {
+                radius,
+                color,
+                fillColor: color,
+                fillOpacity: 0.25
+            }).addTo(map);
+
+            const marker = L.marker([lat, lng], {
+                icon: L.divIcon({
+                    html: `<div style="
+                        background:${color};
+                        color:white;
+                        width:26px;
+                        height:26px;
+                        border-radius:50%;
+                        text-align:center;
+                        line-height:26px;
+                        font-weight:bold;">
+                        ${count}
+                    </div>`
+                })
+            }).addTo(map);
+
+            circles.push(circle);
+            markers.push(marker);
+
+            alerts.push({
+                number,
+                pingTime,
+                category,
+                lat,
+                lng,
+                radius,
+                circle,
+                marker
+            });
+        });
+
+        renderTable();
+        applyFilter(); // ensure filtered view updates
+    };
+    reader.readAsText(file);
+}
+
+// Export circles as KML
+function exportKML() {
+    let kml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
+    kml += `<kml xmlns="http://www.opengis.net/kml/2.2">\n<Document>\n`;
+
+    alerts.forEach(alert => {
+        kml += `<Placemark>\n`;
+        kml += `<name>Alert ${alert.number} - ${alert.category}</name>\n`;
+        kml += `<Point>\n<coordinates>${alert.lng},${alert.lat}</coordinates>\n</Point>\n`;
+        kml += `<description>Ping Time: ${alert.pingTime}</description>\n`;
+        kml += `</Placemark>\n`;
+    });
+
+    kml += `</Document>\n</kml>`;
+
+    const blob = new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "alerts.kml";
+    a.click();
+    URL.revokeObjectURL(url);
+}
+</script>
+
+</body>
+</html>
